@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Infinity Popup</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <h1>Infinity</h1>
+    
+    <div class="stats-section">
+      <div class="stat">
+        <span class="stat-label">Windows</span>
+        <span class="stat-value" id="windowCount">0</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Tabs</span>
+        <span class="stat-value" id="tabCount">0</span>
+      </div>
+    </div>
+
+    <div class="tabs-section">
+      <h2>Current Tabs</h2>
+      <ul id="tabsList" class="tabs-list"></ul>
+    </div>
+
+    <div class="actions-section">
+      <button id="openSettingsBtn" class="btn btn-primary">Settings</button>
+      <button id="closeAllTabsBtn" class="btn btn-secondary">Close All</button>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

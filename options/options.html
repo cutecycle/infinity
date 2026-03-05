@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Infinity Options</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="options-container">
+    <header class="header">
+      <h1>Infinity Settings</h1>
+      <p class="subtitle">Configure your extension preferences</p>
+    </header>
+
+    <main class="content">
+      <section class="settings-section">
+        <h2>Display Settings</h2>
+        
+        <div class="setting-item">
+          <label for="autoSortTabs">
+            <input type="checkbox" id="autoSortTabs" class="checkbox">
+            <span>Auto-sort tabs alphabetically</span>
+          </label>
+          <p class="help-text">Automatically organize tabs by title</p>
+        </div>
+
+        <div class="setting-item">
+          <label for="showNotifications">
+            <input type="checkbox" id="showNotifications" class="checkbox" checked>
+            <span>Show notifications</span>
+          </label>
+          <p class="help-text">Display notifications for extension actions</p>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h2>Tab Management</h2>
+        
+        <div class="setting-item">
+          <label for="closeConfirm">
+            <input type="checkbox" id="closeConfirm" class="checkbox" checked>
+            <span>Confirm before closing multiple tabs</span>
+          </label>
+          <p class="help-text">Prevent accidental bulk tab closing</p>
+        </div>
+
+        <div class="setting-item">
+          <label for="maxTabs">Max tabs to display:</label>
+          <input type="number" id="maxTabs" class="input-field" min="5" max="100" value="50">
+          <p class="help-text">Maximum number of tabs shown in popup</p>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h2>Advanced</h2>
+        
+        <div class="setting-item">
+          <button id="exportButton" class="btn btn-secondary">Export Settings</button>
+          <button id="importButton" class="btn btn-secondary">Import Settings</button>
+          <input type="file" id="importFile" accept=".json" style="display: none;">
+        </div>
+
+        <div class="setting-item">
+          <button id="resetButton" class="btn btn-danger">Reset to Defaults</button>
+          <p class="help-text">Restore all settings to their default values</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <button id="saveButton" class="btn btn-primary">Save Changes</button>
+      <div id="status" class="status-message"></div>
+    </footer>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>
