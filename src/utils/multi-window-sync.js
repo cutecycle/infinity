@@ -183,14 +183,15 @@ class WindowSyncManager {
       const tabs = await this.getWindowTabs(windowId);
       let sleepCount = 0;
 
-      for (const tab of tabs) {
-        // Skip active tab — it's the one the user was looking at
-        if (tab.active) continue;
+      // Find the active tab and any already-discarded tab we can swap to
+      const activeTab = tabs.find(t => t.active);
+      const alreadyDiscarded = tabs.find(t => t.discarded);
 
-        // Skip exceptions (pinned, whitelisted, chrome:// pages)
+      // First pass: sleep all non-active tabs
+      for (const tab of tabs) {
+        if (tab.active) continue;
         if (this.shouldSkipTab(tab, exceptions)) continue;
 
-        // Skip already-discarded tabs
         if (tab.discarded) {
           const tabState = this.swManager.storage.tabStates[tab.id];
           if (tabState) tabState.state = 'sleeping';
@@ -202,6 +203,21 @@ class WindowSyncManager {
           sleepCount++;
         } catch (error) {
           console.warn(`[WindowSyncManager] Error sleeping tab ${tab.id}:`, error);
+        }
+      }
+
+      // Second pass: discard the active tab too by swapping active to a discarded tab.
+      // Chrome won't discard the active tab, so we briefly activate a different tab first.
+      if (activeTab && !this.shouldSkipTab(activeTab, exceptions) && !activeTab.discarded) {
+        const swapTarget = tabs.find(t => t.id !== activeTab.id && !this.shouldSkipTab(t, exceptions));
+        if (swapTarget) {
+          try {
+            await chrome.tabs.update(swapTarget.id, { active: true });
+            await this.swManager.sleepTab(activeTab.id);
+            sleepCount++;
+          } catch (error) {
+            console.warn(`[WindowSyncManager] Could not discard active tab ${activeTab.id}:`, error);
+          }
         }
       }
 
