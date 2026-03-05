@@ -574,7 +574,4 @@ class TabSleep {
   }
 }
 
-// Export for use in content script
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = TabSleep;
-}
+export default TabSleep;
