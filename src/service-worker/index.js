@@ -5,6 +5,9 @@
  * Handles global state persistence and event synchronization
  */
 
+import WindowSyncManager from '../utils/multi-window-sync.js';
+import { getTabCapture } from '../utils/tab-capture.js';
+
 /**
  * @typedef {Object} TabState
  * @property {number} tabId - Chrome tab ID
@@ -52,7 +55,14 @@ class ServiceWorkerManager {
       reportMemory: this.handleReportMemory.bind(this),
       getSleepStats: this.handleGetSleepStats.bind(this),
       getSleepTarget: this.handleGetSleepTarget.bind(this),
+      getMultiWindowSyncStatus: this.handleGetMultiWindowSyncStatus.bind(this),
+      updateMultiWindowSyncConfig: this.handleUpdateMultiWindowSyncConfig.bind(this),
+      captureTabPreviewRequest: this.handleCaptureTabPreviewRequest.bind(this),
+      getPreviewStats: this.handleGetPreviewStats.bind(this),
     };
+
+    // Initialize WindowSyncManager for multi-window coordination
+    this.windowSyncManager = new WindowSyncManager(this);
   }
 
   /**
@@ -61,6 +71,7 @@ class ServiceWorkerManager {
   async init() {
     await this.loadStorage();
     this.setupEventListeners();
+    await this.windowSyncManager.initializeSync();
     console.log('[Infinity] Service Worker initialized');
   }
 
@@ -254,7 +265,11 @@ class ServiceWorkerManager {
    */
   async handleWindowFocusChanged(windowId) {
     try {
-      // If windowId is -1, no window has focus (e.g., focus moved to another app)
+      // Delegate to WindowSyncManager for multi-window coordination
+      const oldWindowId = this.windowSyncManager.currentFocusedWindowId;
+      await this.windowSyncManager.handleActiveWindowChange(oldWindowId, windowId);
+
+      // Also update basic state for compatibility
       if (windowId === -1) {
         // Mark all windows as inactive
         Object.values(this.storage.windowStates).forEach((ws) => {
@@ -264,16 +279,6 @@ class ServiceWorkerManager {
         // Mark all windows as inactive except the focused one
         Object.entries(this.storage.windowStates).forEach(([wid, ws]) => {
           ws.isActive = parseInt(wid) === windowId;
-        });
-
-        // Wake all tabs in focused window, sleep in others
-        Object.entries(this.storage.tabStates).forEach(([tid, ts]) => {
-          if (ts.windowId === windowId) {
-            ts.state = 'awake';
-          } else if (ts.state !== 'sleeping') {
-            // Only sleep if not already sleeping
-            ts.state = 'sleeping';
-          }
         });
       }
 
@@ -424,6 +429,52 @@ class ServiceWorkerManager {
       console.log(`[Infinity] Preview updated for tab: ${tabId}`);
     } catch (error) {
       console.error(`[Infinity] Error updating tab preview: ${tabId}`, error);
+    }
+  }
+
+  /**
+   * Capture and store tab preview using TabCapture
+   * This method integrates with the tab-capture.js module
+   */
+  async captureAndStoreTabPreview(tabId, tabInfo) {
+    try {
+      // Dynamic import of TabCapture (will be available in built output)
+      // Note: In production build, TabCapture is bundled with service worker
+      const tabCapture = getTabCapture?.() || null;
+      
+      if (!tabCapture) {
+        console.warn(`[Infinity] TabCapture not available for tab: ${tabId}`);
+        return false;
+      }
+
+      // Capture the tab
+      const preview = await tabCapture.captureTab(tabId);
+      
+      if (!preview) {
+        console.warn(`[Infinity] Failed to capture tab: ${tabId}`);
+        return false;
+      }
+
+      // Store with metadata
+      const metadata = {
+        title: tabInfo?.title || 'Unknown',
+        url: tabInfo?.url || '',
+        favicon: tabInfo?.favIconUrl || '',
+      };
+
+      const stored = await tabCapture.storePreview(tabId, preview, metadata);
+      
+      if (stored) {
+        // Also store in tab state for quick access
+        await this.updateTabPreview(tabId, preview);
+        console.log(`[Infinity] Captured and stored preview for tab: ${tabId}`);
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      console.error(`[Infinity] Error capturing/storing preview for tab: ${tabId}`, error);
+      return false;
     }
   }
 
@@ -579,6 +630,53 @@ class ServiceWorkerManager {
   }
 
   /**
+   * Handle message: captureTabPreview (from TabCapture module)
+   */
+  async handleCaptureTabPreviewRequest(message, sender, sendResponse) {
+    try {
+      const { tabId } = message;
+      const tabState = this.storage.tabStates[tabId];
+      
+      if (!tabState) {
+        sendResponse({ success: false, error: 'Tab not found' });
+        return;
+      }
+
+      const result = await this.captureAndStoreTabPreview(tabId, {
+        title: tabState.title,
+        url: tabState.originalUrl,
+        favIconUrl: tabState.favicon,
+      });
+
+      sendResponse({ success: result });
+    } catch (error) {
+      console.error('[Infinity] Error handling captureTabPreviewRequest:', error);
+      sendResponse({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * Handle message: getPreviewStats (from TabCapture module)
+   */
+  async handleGetPreviewStats(message, sender, sendResponse) {
+    try {
+      // This will be called if TabCapture is available
+      const tabCapture = getTabCapture?.() || null;
+      
+      if (!tabCapture) {
+        sendResponse({ success: false, error: 'TabCapture not available' });
+        return;
+      }
+
+      const stats = await tabCapture.getPreviewStats();
+      sendResponse({ success: true, stats });
+    } catch (error) {
+      console.error('[Infinity] Error handling getPreviewStats:', error);
+      sendResponse({ success: false, error: error.message });
+    }
+  }
+
+  /**
    * Main message router
    */
   handleMessage(request, sender, sendResponse) {
@@ -591,6 +689,33 @@ class ServiceWorkerManager {
     }
 
     handler(request, sender, sendResponse);
+  }
+
+  /**
+   * Handle message: getMultiWindowSyncStatus
+   */
+  async handleGetMultiWindowSyncStatus(message, sender, sendResponse) {
+    try {
+      const status = await this.windowSyncManager.getGlobalSyncStatus();
+      sendResponse({ success: true, status });
+    } catch (error) {
+      console.error('[Infinity] Error handling getMultiWindowSyncStatus:', error);
+      sendResponse({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * Handle message: updateMultiWindowSyncConfig
+   */
+  async handleUpdateMultiWindowSyncConfig(message, sender, sendResponse) {
+    try {
+      const { config } = message;
+      await this.windowSyncManager.updateSyncConfig(config);
+      sendResponse({ success: true });
+    } catch (error) {
+      console.error('[Infinity] Error handling updateMultiWindowSyncConfig:', error);
+      sendResponse({ success: false, error: error.message });
+    }
   }
 }
 

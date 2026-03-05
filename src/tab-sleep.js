@@ -490,6 +490,46 @@ class TabSleep {
   }
 
   /**
+   * Capture current page as preview for TabCapture module
+   * Responds to 'captureTabPreview' action from service worker
+   */
+  async handleCapturePreviewRequest() {
+    try {
+      // If tab is already sleeping, use existing preview
+      if (this.isAsleep && this.previewContainer) {
+        const img = this.previewContainer.querySelector('img');
+        if (img && img.src) {
+          return {
+            success: true,
+            preview: img.src,
+          };
+        }
+      }
+
+      // Otherwise, capture a fresh preview
+      const preview = await this.capturePreview();
+      
+      if (preview) {
+        return {
+          success: true,
+          preview,
+        };
+      }
+
+      return {
+        success: false,
+        error: 'Failed to capture preview',
+      };
+    } catch (error) {
+      console.error('[TabSleep] Error handling capture preview request:', error);
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
    * Listen for messages from service worker
    */
   setupMessageListener() {
@@ -504,6 +544,12 @@ class TabSleep {
         } else if (request.action === 'wake') {
           console.log('[TabSleep] Received wake message');
           this.wake().then((result) => {
+            sendResponse(result);
+          });
+          return true;
+        } else if (request.action === 'captureTabPreview') {
+          console.log('[TabSleep] Received capture preview request');
+          this.handleCapturePreviewRequest().then((result) => {
             sendResponse(result);
           });
           return true;
