@@ -11,7 +11,7 @@ module.exports = (env, argv) => {
     mode: argv.mode || 'development',
     devtool: isProduction ? 'source-map' : 'eval-source-map',
     entry: {
-      'service-worker': './src/service-worker.js',
+      'service-worker': './src/service-worker/index.js',
       'content-script': './src/content-script.js',
       'popup': './src/popup/index.js',
       'options': './src/options/index.js',
