@@ -70,9 +70,38 @@ class ServiceWorkerManager {
    */
   async init() {
     await this.loadStorage();
+    await this.discoverExistingTabs();
     this.setupEventListeners();
     await this.windowSyncManager.initializeSync();
     console.log('[Infinity] Service Worker initialized');
+  }
+
+  /**
+   * Discover all existing tabs/windows and populate state
+   */
+  async discoverExistingTabs() {
+    try {
+      const windows = await chrome.windows.getAll({ populate: true });
+      for (const win of windows) {
+        if (win.type !== 'normal') continue;
+
+        this.storage.windowStates[win.id] = {
+          windowId: win.id,
+          isActive: win.focused,
+          tabs: win.tabs.map(t => t.id),
+        };
+
+        for (const tab of win.tabs) {
+          if (!this.storage.tabStates[tab.id]) {
+            this.initializeTabState(tab);
+          }
+        }
+      }
+      await this.saveStorage();
+      console.log(`[Infinity] Discovered ${Object.keys(this.storage.tabStates).length} tabs across ${windows.length} windows`);
+    } catch (error) {
+      console.error('[Infinity] Error discovering existing tabs:', error);
+    }
   }
 
   /**
@@ -326,7 +355,10 @@ class ServiceWorkerManager {
   }
 
   /**
-   * Sleep a tab (unload content, capture preview)
+   * Sleep a tab using chrome.tabs.discard() for reliable memory reclamation.
+   * This is the same mechanism Chrome mobile uses to handle thousands of tabs.
+   * The tab stays in the tab strip but its renderer process is killed.
+   * Chrome natively preserves the tab's title, favicon, and thumbnail for alt-tab.
    */
   async sleepTab(tabId) {
     try {
@@ -336,33 +368,46 @@ class ServiceWorkerManager {
       }
 
       const tabState = this.storage.tabStates[tabId];
-      tabState.state = 'sleeping';
 
-      // Send sleep message to content script
+      // Don't re-sleep already sleeping tabs
+      if (tabState.state === 'sleeping') return;
+
+      // Don't discard the active tab in the focused window
       try {
-        const response = await chrome.tabs.sendMessage(tabId, {
-          action: 'sleep',
-        });
-
-        if (response && response.state) {
-          tabState.savedState = response.state;
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.active) {
+          console.log(`[Infinity] Skipping active tab: ${tabId}`);
+          return;
         }
-        if (response && response.preview) {
-          tabState.preview = response.preview;
+        if (tab.discarded) {
+          tabState.state = 'sleeping';
+          await this.saveStorage();
+          return;
         }
-      } catch (error) {
-        console.warn(`[Infinity] Failed to communicate with tab ${tabId}:`, error);
+      } catch (e) {
+        // Tab may have been closed
+        delete this.storage.tabStates[tabId];
+        await this.saveStorage();
+        return;
       }
 
+      // Use Chrome's native tab discard — kills the renderer process,
+      // reclaims memory, but preserves the tab entry and its thumbnail.
+      await chrome.tabs.discard(tabId);
+
+      tabState.state = 'sleeping';
       await this.saveStorage();
-      console.log(`[Infinity] Tab sleeping: ${tabId}`);
+      console.log(`[Infinity] Tab discarded (sleeping): ${tabId} - ${tabState.title}`);
     } catch (error) {
-      console.error(`[Infinity] Error sleeping tab: ${tabId}`, error);
+      // chrome.tabs.discard throws if tab can't be discarded (e.g. active tab, playing audio)
+      console.warn(`[Infinity] Could not discard tab ${tabId}:`, error.message);
     }
   }
 
   /**
-   * Wake a tab (reload content, restore state)
+   * Wake a tab — Chrome handles this automatically when the user clicks on a
+   * discarded tab. We just update our internal state.
+   * If we want to proactively wake, we reload the tab.
    */
   async wakeTab(tabId) {
     try {
@@ -372,20 +417,24 @@ class ServiceWorkerManager {
       }
 
       const tabState = this.storage.tabStates[tabId];
+      if (tabState.state !== 'sleeping') return;
+
       tabState.state = 'awake';
       tabState.lastActive = Date.now();
 
-      // Send wake message to content script
+      // Check if tab is still discarded; if so, reload it
       try {
-        await chrome.tabs.sendMessage(tabId, {
-          action: 'wake',
-        });
-      } catch (error) {
-        console.warn(`[Infinity] Failed to communicate with tab ${tabId}:`, error);
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.discarded) {
+          await chrome.tabs.reload(tabId);
+        }
+      } catch (e) {
+        // Tab may have been closed
+        delete this.storage.tabStates[tabId];
       }
 
       await this.saveStorage();
-      console.log(`[Infinity] Tab awake: ${tabId}`);
+      console.log(`[Infinity] Tab woken: ${tabId}`);
     } catch (error) {
       console.error(`[Infinity] Error waking tab: ${tabId}`, error);
     }

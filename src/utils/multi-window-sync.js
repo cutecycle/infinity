@@ -111,23 +111,17 @@ class WindowSyncManager {
 
   /**
    * Main handler for active window change
-   * Orchestrates sleeping tabs in non-focused windows and waking tabs in focused window
+   * Sleeps all non-active tabs in unfocused windows.
+   * Does NOT proactively wake tabs — Chrome auto-wakes discarded tabs when clicked.
    */
   async handleActiveWindowChange(oldWindowId, newWindowId) {
     try {
       if (!this.syncConfig.enableMultiWindowSync) {
-        log('WindowSyncManager: Multi-window sync disabled', {});
         return;
       }
 
-      log('WindowSyncManager: Window focus change', { 
-        oldWindowId, 
-        newWindowId,
-      });
-
-      // Handle case where focus moved away from Chrome
+      // Handle case where focus moved away from Chrome entirely
       if (newWindowId === -1) {
-        log('WindowSyncManager: Chrome lost focus', {});
         this.previousFocusedWindowId = this.currentFocusedWindowId;
         return;
       }
@@ -142,36 +136,31 @@ class WindowSyncManager {
 
       this.windowSwitchTimeout = setTimeout(async () => {
         try {
-          // Wake tabs in newly focused window
-          if (newWindowId !== -1) {
-            await this.wakeWindowTabs(newWindowId);
-          }
-
-          // Sleep tabs in previously focused window(s)
-          if (oldWindowId && oldWindowId !== -1) {
-            await this.sleepWindowTabs(oldWindowId, {
-              pinned: true,
-              whitelisted: true,
-            });
-          } else if (this.previousFocusedWindowId && this.previousFocusedWindowId !== -1) {
-            await this.sleepWindowTabs(this.previousFocusedWindowId, {
-              pinned: true,
-              whitelisted: true,
-            });
-          }
-
-          // Sleep tabs in all other inactive windows
+          // Sleep non-active tabs in ALL unfocused windows
           const allWindows = await this.getAllWindowsWithTabs();
-          for (const window of allWindows) {
-            if (window.id !== newWindowId && window.focused === false) {
-              await this.sleepWindowTabs(window.id, {
-                pinned: true,
-                whitelisted: true,
-              });
+          for (const win of allWindows) {
+            if (win.id === newWindowId || win.type !== 'normal') continue;
+
+            await this.sleepWindowTabs(win.id, {
+              pinned: true,
+              whitelisted: true,
+            });
+          }
+
+          // Mark active tab in focused window as awake (don't reload others)
+          const focusedWin = allWindows.find(w => w.id === newWindowId);
+          if (focusedWin) {
+            const activeTab = focusedWin.tabs.find(t => t.active);
+            if (activeTab) {
+              const tabState = this.swManager.storage.tabStates[activeTab.id];
+              if (tabState) {
+                tabState.state = 'awake';
+                tabState.lastActive = Date.now();
+              }
             }
           }
 
-          // Report state changes to UI
+          await this.swManager.saveStorage();
           await this.broadcastStateChanges();
         } catch (error) {
           console.error('[WindowSyncManager] Error handling window switch:', error);
@@ -187,53 +176,42 @@ class WindowSyncManager {
    */
   async sleepWindowTabs(windowId, exceptions = {}) {
     try {
-      // Skip if operation already in progress
-      if (this.operationInProgress.has(windowId)) {
-        log('WindowSyncManager: Sleep operation already in progress', { windowId });
-        return;
-      }
+      if (this.operationInProgress.has(windowId)) return;
 
       this.operationInProgress.add(windowId);
-      log('WindowSyncManager: Sleeping window tabs', { windowId, exceptions });
 
       const tabs = await this.getWindowTabs(windowId);
-      const tabsToSleep = [];
+      let sleepCount = 0;
 
       for (const tab of tabs) {
-        // Check if tab should be skipped
-        if (this.shouldSkipTab(tab, exceptions)) {
-          log('WindowSyncManager: Skipping tab (exception)', { 
-            tabId: tab.id, 
-            title: tab.title,
-            reason: this.getSkipReason(tab, exceptions),
-          });
+        // Skip active tab — it's the one the user was looking at
+        if (tab.active) continue;
+
+        // Skip exceptions (pinned, whitelisted, chrome:// pages)
+        if (this.shouldSkipTab(tab, exceptions)) continue;
+
+        // Skip already-discarded tabs
+        if (tab.discarded) {
+          const tabState = this.swManager.storage.tabStates[tab.id];
+          if (tabState) tabState.state = 'sleeping';
           continue;
         }
 
-        tabsToSleep.push(tab.id);
+        try {
+          await this.swManager.sleepTab(tab.id);
+          sleepCount++;
+        } catch (error) {
+          console.warn(`[WindowSyncManager] Error sleeping tab ${tab.id}:`, error);
+        }
       }
 
-      // Batch sleep operations
-      if (tabsToSleep.length > 0) {
-        log('WindowSyncManager: Batching sleep for tabs', { 
-          windowId, 
-          count: tabsToSleep.length,
-        });
+      if (sleepCount > 0) {
+        console.log(`[WindowSyncManager] Slept ${sleepCount} tabs in window ${windowId}`);
+      }
 
-        // Execute sleep operations
-        for (const tabId of tabsToSleep) {
-          try {
-            await this.swManager.sleepTab(tabId);
-          } catch (error) {
-            console.warn(`[WindowSyncManager] Error sleeping tab ${tabId}:`, error);
-          }
-        }
-
-        // Update window state
-        if (this.swManager.storage.windowStates[windowId]) {
-          this.swManager.storage.windowStates[windowId].isActive = false;
-          await this.swManager.saveStorage();
-        }
+      if (this.swManager.storage.windowStates[windowId]) {
+        this.swManager.storage.windowStates[windowId].isActive = false;
+        await this.swManager.saveStorage();
       }
 
       this.operationInProgress.delete(windowId);
