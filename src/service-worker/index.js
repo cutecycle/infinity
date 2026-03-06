@@ -384,6 +384,21 @@ class ServiceWorkerManager {
         return;
       }
 
+      // Don't suspend pinned tabs
+      if (tab.pinned) {
+        return;
+      }
+
+      // Don't suspend tabs that have form data the user may lose
+      try {
+        const response = await chrome.tabs.sendMessage(tabId, { action: 'checkForForms' });
+        if (response && response.hasForms) {
+          return;
+        }
+      } catch (e) {
+        // Content script not available — proceed with sleep
+      }
+
       // Capture a preview screenshot before suspending
       let preview = null;
       try {

@@ -547,6 +547,19 @@ class TabSleep {
             sendResponse(result);
           });
           return true;
+        } else if (request.action === 'checkForForms') {
+          // Only block sleep for traditional forms with unsaved user input
+          // (e.g. registration, checkout, compose) — not SPAs with incidental inputs
+          const forms = document.querySelectorAll('form');
+          const hasDirtyForm = Array.from(forms).some((form) => {
+            const inputs = form.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"]), textarea, select');
+            return Array.from(inputs).some((el) => {
+              if (el.type === 'checkbox' || el.type === 'radio') return el.checked && el.defaultChecked !== el.checked;
+              return el.value.trim().length > 0 && el.value !== el.defaultValue;
+            });
+          });
+          sendResponse({ hasForms: hasDirtyForm });
+          return false;
         } else if (request.action === 'captureTabPreview') {
           console.log('[TabSleep] Received capture preview request');
           this.handleCapturePreviewRequest().then((result) => {
