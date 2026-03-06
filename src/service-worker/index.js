@@ -355,10 +355,10 @@ class ServiceWorkerManager {
   }
 
   /**
-   * Sleep a tab using chrome.tabs.discard() for reliable memory reclamation.
-   * This is the same mechanism Chrome mobile uses to handle thousands of tabs.
-   * The tab stays in the tab strip but its renderer process is killed.
-   * Chrome natively preserves the tab's title, favicon, and thumbnail for alt-tab.
+   * Sleep a tab by navigating it to a lightweight suspended.html page.
+   * This fully destroys the original page's renderer process, freeing memory.
+   * Works on ANY tab — including the active tab in an unfocused window.
+   * A screenshot preview is captured first and stored for the suspension page.
    */
   async sleepTab(tabId) {
     try {
@@ -368,46 +368,65 @@ class ServiceWorkerManager {
       }
 
       const tabState = this.storage.tabStates[tabId];
-
-      // Don't re-sleep already sleeping tabs
       if (tabState.state === 'sleeping') return;
 
-      // Don't discard the active tab in the focused window
+      let tab;
       try {
-        const tab = await chrome.tabs.get(tabId);
-        if (tab.active) {
-          console.log(`[Infinity] Skipping active tab: ${tabId}`);
-          return;
-        }
-        if (tab.discarded) {
-          tabState.state = 'sleeping';
-          await this.saveStorage();
-          return;
-        }
+        tab = await chrome.tabs.get(tabId);
       } catch (e) {
-        // Tab may have been closed
         delete this.storage.tabStates[tabId];
         await this.saveStorage();
         return;
       }
 
-      // Use Chrome's native tab discard — kills the renderer process,
-      // reclaims memory, but preserves the tab entry and its thumbnail.
-      await chrome.tabs.discard(tabId);
+      // Don't suspend our own extension pages or chrome:// URLs
+      if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://') || tab.url.startsWith('about:')) {
+        return;
+      }
 
+      // Capture a preview screenshot before suspending
+      let preview = null;
+      try {
+        // captureVisibleTab only works for the active tab in the focused window,
+        // so we try content-script canvas capture via message
+        const response = await chrome.tabs.sendMessage(tabId, { action: 'captureTabPreview' });
+        if (response && response.success && response.preview) {
+          preview = response.preview;
+        }
+      } catch (e) {
+        // Content script not available — that's fine, we'll show a placeholder
+      }
+
+      // Store the preview in local storage keyed by tab ID
+      const previewKey = `preview_${tabId}`;
+      if (preview) {
+        await chrome.storage.local.set({ [previewKey]: { preview, timestamp: Date.now() } });
+      }
+
+      // Save the original URL before navigating away
+      tabState.originalUrl = tab.url;
+      tabState.title = tab.title || '';
+      tabState.favicon = tab.favIconUrl || '';
       tabState.state = 'sleeping';
+
+      // Navigate to the suspension page
+      const suspendedUrl = chrome.runtime.getURL('suspended.html') +
+        `?url=${encodeURIComponent(tab.url)}` +
+        `&title=${encodeURIComponent(tab.title || '')}` +
+        `&preview=${encodeURIComponent(previewKey)}`;
+
+      await chrome.tabs.update(tabId, { url: suspendedUrl });
+
       await this.saveStorage();
-      console.log(`[Infinity] Tab discarded (sleeping): ${tabId} - ${tabState.title}`);
+      console.log(`[Infinity] Tab suspended: ${tabId} - ${tabState.title}`);
     } catch (error) {
-      // chrome.tabs.discard throws if tab can't be discarded (e.g. active tab, playing audio)
-      console.warn(`[Infinity] Could not discard tab ${tabId}:`, error.message);
+      console.warn(`[Infinity] Could not suspend tab ${tabId}:`, error.message);
     }
   }
 
   /**
-   * Wake a tab — Chrome handles this automatically when the user clicks on a
-   * discarded tab. We just update our internal state.
-   * If we want to proactively wake, we reload the tab.
+   * Wake a tab — navigate it back to its original URL.
+   * Also called automatically by the suspended page itself on visibility change.
    */
   async wakeTab(tabId) {
     try {
@@ -422,16 +441,19 @@ class ServiceWorkerManager {
       tabState.state = 'awake';
       tabState.lastActive = Date.now();
 
-      // Check if tab is still discarded; if so, reload it
+      // Navigate back to the original URL if still on the suspended page
       try {
         const tab = await chrome.tabs.get(tabId);
-        if (tab.discarded) {
-          await chrome.tabs.reload(tabId);
+        if (tab.url && tab.url.includes('suspended.html') && tabState.originalUrl) {
+          await chrome.tabs.update(tabId, { url: tabState.originalUrl });
         }
       } catch (e) {
-        // Tab may have been closed
         delete this.storage.tabStates[tabId];
       }
+
+      // Clean up preview from storage
+      const previewKey = `preview_${tabId}`;
+      await chrome.storage.local.remove([previewKey]);
 
       await this.saveStorage();
       console.log(`[Infinity] Tab woken: ${tabId}`);

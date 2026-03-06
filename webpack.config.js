@@ -48,6 +48,14 @@ module.exports = (env, argv) => {
             to: 'icons',
             noErrorOnMissing: true,
           },
+          {
+            from: 'public/suspended.html',
+            to: 'suspended.html',
+          },
+          {
+            from: 'public/suspended.js',
+            to: 'suspended.js',
+          },
         ],
       }),
       new HtmlWebpackPlugin({
