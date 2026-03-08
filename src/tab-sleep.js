@@ -104,42 +104,19 @@ class TabSleep {
   }
 
   /**
-   * Create a canvas preview of current page state
+   * Create a canvas preview of the full page
    */
   async createPreviewCanvas() {
     try {
-      // Simple approach: capture visible viewport with basic styling
-      const width = Math.min(window.innerWidth, 1920);
-      const height = Math.min(window.innerHeight, 1080);
-      
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-
-      // Draw background
-      const bgColor = window.getComputedStyle(document.body).backgroundColor || '#ffffff';
-      ctx.fillStyle = bgColor;
-      ctx.fillRect(0, 0, width, height);
-
-      // Draw title
-      ctx.fillStyle = '#333333';
-      ctx.font = 'bold 18px Arial, sans-serif';
-      ctx.fillText(document.title, 20, 40);
-
-      // Draw URL
-      ctx.fillStyle = '#666666';
-      ctx.font = '14px Arial, sans-serif';
-      const urlText = window.location.href.substring(0, 80) + (window.location.href.length > 80 ? '...' : '');
-      ctx.fillText(urlText, 20, 70);
-
-      // Draw sleeping indicator
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
-      ctx.fillRect(0, 0, width, height);
-      ctx.fillStyle = '#666666';
-      ctx.font = '14px Arial, sans-serif';
-      ctx.fillText('💤 Tab is sleeping', 20, height - 20);
-
+      const canvas = await html2canvas(document.body, {
+        useCORS: true,
+        allowTaint: true,
+        logging: false,
+        windowWidth: document.documentElement.scrollWidth,
+        windowHeight: document.documentElement.scrollHeight,
+        width: document.documentElement.scrollWidth,
+        height: document.documentElement.scrollHeight,
+      });
       return canvas;
     } catch (error) {
       console.error('[TabSleep] Error creating preview canvas:', error);
@@ -566,6 +543,10 @@ class TabSleep {
             sendResponse(result);
           });
           return true;
+        } else if (request.action === 'scrollToTop') {
+          window.scrollTo(0, 0);
+          sendResponse({ success: true });
+          return false;
         }
       });
 

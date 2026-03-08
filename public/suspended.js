@@ -34,19 +34,5 @@ function wake() {
   }
 }
 
-// Wake on click anywhere
+// Wake only on explicit click — no auto-resume on tab switch
 document.addEventListener('click', wake);
-
-// Wake when this tab becomes visible (user switched to it)
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
-    wake();
-  }
-});
-
-// Also listen for messages from the service worker to wake
-chrome.runtime.onMessage.addListener((request) => {
-  if (request.action === 'wake') {
-    wake();
-  }
-});

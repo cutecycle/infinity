@@ -191,7 +191,7 @@ class ServiceWorkerManager {
 
       const tabState = this.storage.tabStates[tabId];
       tabState.lastActive = Date.now();
-      tabState.state = 'awake';
+      // Don't auto-wake sleeping tabs on activation; require a click on suspended.html
 
       // Update window state
       if (!this.storage.windowStates[windowId]) {
@@ -399,17 +399,32 @@ class ServiceWorkerManager {
         // Content script not available — proceed with sleep
       }
 
-      // Capture a preview screenshot before suspending
+      // Capture a preview screenshot via captureVisibleTab (real screenshot).
+      // This requires the tab to be the active tab in its window.
       let preview = null;
       try {
-        // captureVisibleTab only works for the active tab in the focused window,
-        // so we try content-script canvas capture via message
-        const response = await chrome.tabs.sendMessage(tabId, { action: 'captureTabPreview' });
-        if (response && response.success && response.preview) {
-          preview = response.preview;
+        const windowId = tab.windowId;
+        const isActiveTab = tab.active;
+
+        // If the tab isn't active in its window, activate it briefly for capture
+        if (!isActiveTab) {
+          await chrome.tabs.update(tabId, { active: true });
+          // Small delay for Chrome to render the tab
+          await new Promise(r => setTimeout(r, 150));
         }
+
+        // Tell the content script to scroll to the top so we capture the page start
+        try {
+          await chrome.tabs.sendMessage(tabId, { action: 'scrollToTop' });
+          await new Promise(r => setTimeout(r, 100));
+        } catch (_) { /* content script may not be available */ }
+
+        preview = await chrome.tabs.captureVisibleTab(windowId, {
+          format: 'jpeg',
+          quality: 85,
+        });
       } catch (e) {
-        // Content script not available — that's fine, we'll show a placeholder
+        console.warn(`[Infinity] captureVisibleTab failed for tab ${tabId}:`, e.message);
       }
 
       // Store the preview in local storage keyed by tab ID

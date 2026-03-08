@@ -23,9 +23,9 @@
  */
 
 const STORAGE_PREFIX = 'infinity-preview';
-const MAX_PREVIEW_SIZE = 102400; // 100 KB per preview
-const PREVIEW_WIDTH = 256;
-const PREVIEW_HEIGHT = 180;
+const MAX_PREVIEW_SIZE = 2097152; // 2 MB per preview (full-page screenshots)
+const PREVIEW_WIDTH = 1920;
+const PREVIEW_HEIGHT = 0; // unused — full page height is preserved
 const CLEANUP_BATCH_SIZE = 10; // Clean up multiple previews at once
 const STORAGE_QUOTA_CHECK_INTERVAL = 60000; // Check quota every 60 seconds
 
@@ -354,14 +354,12 @@ class TabCapture {
         
         img.onload = () => {
           try {
-            // Create canvas for resizing/compression
             const canvas = document.createElement('canvas');
-            const maxDim = Math.max(img.width, img.height);
             
-            // Scale down if needed
-            if (maxDim > PREVIEW_WIDTH) {
-              const scale = PREVIEW_WIDTH / maxDim;
-              canvas.width = Math.round(img.width * scale);
+            // Scale width down to PREVIEW_WIDTH if wider, preserving aspect ratio
+            if (img.width > PREVIEW_WIDTH) {
+              const scale = PREVIEW_WIDTH / img.width;
+              canvas.width = PREVIEW_WIDTH;
               canvas.height = Math.round(img.height * scale);
             } else {
               canvas.width = img.width;
@@ -371,12 +369,11 @@ class TabCapture {
             const ctx = canvas.getContext('2d');
             ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-            // Convert to data URL with quality setting
             const compressed = canvas.toDataURL('image/jpeg', quality);
             resolve(compressed);
           } catch (error) {
             console.error('[TabCapture] Error during compression:', error);
-            resolve(dataUrl); // Fall back to original
+            resolve(dataUrl);
           }
         };
 

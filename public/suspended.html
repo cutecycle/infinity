@@ -5,7 +5,7 @@
   <title id="page-title">Tab Suspended</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; overflow: hidden; }
+    html, body { width: 100%; height: 100%; overflow: auto; }
     body {
       background: #1a1a2e;
       color: #e0e0e0;
@@ -13,13 +13,12 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
       cursor: pointer;
       user-select: none;
+      padding: 20px 0;
     }
     #preview {
       max-width: 90vw;
-      max-height: 75vh;
       border-radius: 6px;
       box-shadow: 0 4px 24px rgba(0,0,0,0.5);
       opacity: 0.85;
@@ -73,7 +72,7 @@
   <div class="info">
     <div class="title" id="tab-title"></div>
     <div class="url" id="tab-url"></div>
-    <div class="hint">Click anywhere or switch to this tab to wake up</div>
+    <div class="hint">Click anywhere to wake up</div>
   </div>
 
   <script src="suspended.js"></script>
