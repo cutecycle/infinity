@@ -260,9 +260,37 @@ class ServiceWorkerManager {
         tabState.favicon = changeInfo.favIconUrl;
       }
 
+      // Proactively capture a preview when a tab finishes loading and is active.
+      // This ensures we have a preview ready before the tab is suspended.
+      if (changeInfo.status === 'complete' && tab.active &&
+          tab.url && !tab.url.startsWith('chrome-extension://')) {
+        this.captureActiveTabPreview(tabId, tab.windowId);
+      }
+
       await this.saveStorage();
     } catch (error) {
       console.error(`[Infinity] Error handling tab update: ${tabId}`, error);
+    }
+  }
+
+  /**
+   * Capture a preview of the currently visible tab and store it for later use.
+   * Runs asynchronously without blocking the caller.
+   */
+  async captureActiveTabPreview(tabId, windowId) {
+    try {
+      // Small delay to let final rendering settle
+      await new Promise(r => setTimeout(r, 300));
+      const preview = await chrome.tabs.captureVisibleTab(windowId, {
+        format: 'jpeg',
+        quality: 85,
+      });
+      if (preview) {
+        const previewKey = `preview_${tabId}`;
+        await chrome.storage.local.set({ [previewKey]: { preview, timestamp: Date.now() } });
+      }
+    } catch (e) {
+      // captureVisibleTab may fail for restricted pages — that's fine
     }
   }
 
@@ -402,6 +430,7 @@ class ServiceWorkerManager {
       // Capture a preview screenshot via captureVisibleTab (real screenshot).
       // This requires the tab to be the active tab in its window.
       let preview = null;
+      const previewKey = `preview_${tabId}`;
       try {
         const windowId = tab.windowId;
         const isActiveTab = tab.active;
@@ -409,8 +438,32 @@ class ServiceWorkerManager {
         // If the tab isn't active in its window, activate it briefly for capture
         if (!isActiveTab) {
           await chrome.tabs.update(tabId, { active: true });
-          // Small delay for Chrome to render the tab
-          await new Promise(r => setTimeout(r, 150));
+          // Wait for Chrome to render the re-activated tab.
+          // Background tabs may have had their renderers discarded.
+          await new Promise((resolve) => {
+            let done = false;
+            const finish = () => { if (!done) { done = true; resolve(); } };
+
+            // Listen for the tab to finish loading (in case Chrome needs to reload it)
+            const onUpdated = (updatedId, info) => {
+              if (updatedId === tabId && info.status === 'complete') {
+                chrome.tabs.onUpdated.removeListener(onUpdated);
+                setTimeout(finish, 300);
+              }
+            };
+            chrome.tabs.onUpdated.addListener(onUpdated);
+
+            // If already loaded, just wait for rendering
+            chrome.tabs.get(tabId).then(t => {
+              if (t.status === 'complete') {
+                chrome.tabs.onUpdated.removeListener(onUpdated);
+                setTimeout(finish, 500);
+              }
+            }).catch(() => setTimeout(finish, 1000));
+
+            // Hard cap: 2 seconds
+            setTimeout(finish, 2000);
+          });
         }
 
         // Tell the content script to scroll to the top so we capture the page start
@@ -419,7 +472,7 @@ class ServiceWorkerManager {
           await new Promise(r => setTimeout(r, 100));
         } catch (_) { /* content script may not be available */ }
 
-        preview = await chrome.tabs.captureVisibleTab(windowId, {
+        preview = await chrome.tabs.captureVisibleTab(tab.windowId, {
           format: 'jpeg',
           quality: 85,
         });
@@ -427,8 +480,18 @@ class ServiceWorkerManager {
         console.warn(`[Infinity] captureVisibleTab failed for tab ${tabId}:`, e.message);
       }
 
+      // Fall back to a previously captured preview (from proactive capture)
+      if (!preview) {
+        try {
+          const stored = await chrome.storage.local.get(previewKey);
+          if (stored[previewKey] && stored[previewKey].preview) {
+            preview = stored[previewKey].preview;
+            console.log(`[Infinity] Using previously captured preview for tab ${tabId}`);
+          }
+        } catch (_) { /* no fallback available */ }
+      }
+
       // Store the preview in local storage keyed by tab ID
-      const previewKey = `preview_${tabId}`;
       if (preview) {
         await chrome.storage.local.set({ [previewKey]: { preview, timestamp: Date.now() } });
       }
