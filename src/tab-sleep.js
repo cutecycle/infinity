@@ -525,12 +525,17 @@ class TabSleep {
           });
           return true;
         } else if (request.action === 'checkForForms') {
-          // Only block sleep for traditional forms with unsaved user input
-          // (e.g. registration, checkout, compose) — not SPAs with incidental inputs
+          // Only block sleep for traditional forms with substantial user-entered data
+          // (e.g. registration, checkout, compose) — not SPA inputs managed by frameworks
           const forms = document.querySelectorAll('form');
           const hasDirtyForm = Array.from(forms).some((form) => {
+            // Skip SPA-style forms without traditional submit attributes
+            if (!form.hasAttribute('action') && !form.hasAttribute('method')) return false;
+
             const inputs = form.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"]), textarea, select');
             return Array.from(inputs).some((el) => {
+              // Skip invisible elements (framework-managed hidden state)
+              if (el.offsetParent === null && el.type !== 'hidden') return false;
               if (el.type === 'checkbox' || el.type === 'radio') return el.checked && el.defaultChecked !== el.checked;
               return el.value.trim().length > 0 && el.value !== el.defaultValue;
             });
