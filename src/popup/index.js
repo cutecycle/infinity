@@ -19,7 +19,7 @@ async function render() {
 
   document.getElementById('total').textContent = stats.total;
   document.getElementById('awake').textContent = stats.awake;
-  document.getElementById('sleeping').textContent = stats.sleeping;
+  document.getElementById('sleeping').textContent = stats.sleeping + (stats.discarded || 0);
 
   const list = document.getElementById('tab-list');
   list.innerHTML = '';
@@ -30,6 +30,7 @@ async function render() {
   }
 
   const sleeping = stats.tabs.filter(t => t.state === 'sleeping');
+  const discarded = stats.tabs.filter(t => t.state === 'discarded');
   const awake = stats.tabs.filter(t => t.state === 'awake');
 
   if (sleeping.length > 0) {
@@ -38,6 +39,14 @@ async function render() {
     header.textContent = `💤 Sleeping (${sleeping.length})`;
     list.appendChild(header);
     sleeping.forEach(tab => list.appendChild(createTabRow(tab)));
+  }
+
+  if (discarded.length > 0) {
+    const header = document.createElement('div');
+    header.className = 'section-header';
+    header.textContent = `😴 Discarded (${discarded.length})`;
+    list.appendChild(header);
+    discarded.forEach(tab => list.appendChild(createTabRow(tab)));
   }
 
   if (awake.length > 0) {
@@ -55,7 +64,7 @@ function createTabRow(tab) {
 
   const badge = document.createElement('span');
   badge.className = 'badge';
-  badge.textContent = tab.state === 'sleeping' ? '💤' : '🟢';
+  badge.textContent = tab.state === 'sleeping' ? '💤' : tab.state === 'discarded' ? '😴' : '🟢';
 
   const title = document.createElement('span');
   title.className = 'tab-title';

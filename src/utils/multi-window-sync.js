@@ -172,7 +172,8 @@ class WindowSyncManager {
   }
 
   /**
-   * Sleep all tabs in a window except whitelisted ones
+   * Sleep all tabs in a window except whitelisted ones.
+   * Active tab gets custom sleep (suspended.html), non-active tabs get native discard.
    */
   async sleepWindowTabs(windowId, exceptions = {}) {
     try {
@@ -182,20 +183,28 @@ class WindowSyncManager {
 
       const tabs = await this.getWindowTabs(windowId);
       let sleepCount = 0;
+      let discardCount = 0;
 
       for (const tab of tabs) {
         if (this.shouldSkipTab(tab, exceptions)) continue;
 
         try {
-          await this.swManager.sleepTab(tab.id);
-          sleepCount++;
+          if (tab.active) {
+            // Active tab in unfocused window: custom sleep with preview
+            await this.swManager.sleepTab(tab.id);
+            sleepCount++;
+          } else {
+            // Background tabs: native Chrome discard
+            await this.swManager.discardTab(tab.id);
+            discardCount++;
+          }
         } catch (error) {
-          console.warn(`[WindowSyncManager] Error sleeping tab ${tab.id}:`, error);
+          console.warn(`[WindowSyncManager] Error sleeping/discarding tab ${tab.id}:`, error);
         }
       }
 
-      if (sleepCount > 0) {
-        console.log(`[WindowSyncManager] Slept ${sleepCount} tabs in window ${windowId}`);
+      if (sleepCount > 0 || discardCount > 0) {
+        console.log(`[WindowSyncManager] Window ${windowId}: ${sleepCount} slept, ${discardCount} discarded`);
       }
 
       if (this.swManager.storage.windowStates[windowId]) {
@@ -229,7 +238,7 @@ class WindowSyncManager {
 
       for (const tab of tabs) {
         const tabState = this.swManager.storage.tabStates[tab.id];
-        if (tabState && tabState.state === 'sleeping') {
+        if (tabState && (tabState.state === 'sleeping' || tabState.state === 'discarded')) {
           tabsToWake.push(tab.id);
         }
       }
@@ -280,6 +289,7 @@ class WindowSyncManager {
           total: tabs.length,
           awake: 0,
           sleeping: 0,
+          discarded: 0,
           skipped: 0,
         },
       };
@@ -304,6 +314,8 @@ class WindowSyncManager {
           status.summary.skipped++;
         } else if (tabState && tabState.state === 'awake') {
           status.summary.awake++;
+        } else if (tabState && tabState.state === 'discarded') {
+          status.summary.discarded++;
         } else if (tabState && tabState.state === 'sleeping') {
           status.summary.sleeping++;
         }
@@ -333,6 +345,7 @@ class WindowSyncManager {
           totalTabs: 0,
           awakeTabs: 0,
           sleepingTabs: 0,
+          discardedTabs: 0,
           skippedTabs: 0,
         },
       };
@@ -345,6 +358,7 @@ class WindowSyncManager {
           status.summary.totalTabs += windowStatus.summary.total;
           status.summary.awakeTabs += windowStatus.summary.awake;
           status.summary.sleepingTabs += windowStatus.summary.sleeping;
+          status.summary.discardedTabs += windowStatus.summary.discarded;
           status.summary.skippedTabs += windowStatus.summary.skipped;
 
           if (window.focused) {
@@ -568,12 +582,16 @@ class WindowSyncManager {
       const newWindowState = this.swManager.storage.windowStates[newWindowId];
 
       // If tab is now in focused window, wake it
-      if (newWindowId === this.currentFocusedWindowId && tabState && tabState.state === 'sleeping') {
+      if (newWindowId === this.currentFocusedWindowId && tabState && (tabState.state === 'sleeping' || tabState.state === 'discarded')) {
         await this.swManager.wakeTab(tabId);
       }
-      // If tab is now in unfocused window, sleep it (unless exception)
+      // If tab is now in unfocused window, discard it (unless exception)
       else if (newWindowId !== this.currentFocusedWindowId && !this.shouldSkipTab(tab)) {
-        await this.swManager.sleepTab(tabId);
+        if (tab.active) {
+          await this.swManager.sleepTab(tabId);
+        } else {
+          await this.swManager.discardTab(tabId);
+        }
       }
 
       await this.broadcastStateChanges();

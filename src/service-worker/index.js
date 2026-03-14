@@ -12,7 +12,7 @@ import { getTabCapture } from '../utils/tab-capture.js';
  * @typedef {Object} TabState
  * @property {number} tabId - Chrome tab ID
  * @property {number} windowId - Chrome window ID
- * @property {'awake'|'sleeping'} state - Current state
+ * @property {'awake'|'sleeping'|'discarded'} state - Current state
  * @property {string|null} preview - Base64-encoded preview image
  * @property {string} originalUrl - Tab's original URL
  * @property {string} title - Tab title
@@ -72,18 +72,27 @@ class ServiceWorkerManager {
     await this.loadStorage();
     await this.discoverExistingTabs();
     this.setupEventListeners();
+    this.setupInactiveTabAlarm();
     await this.windowSyncManager.initializeSync();
     console.log('[Infinity] Service Worker initialized');
   }
 
   /**
-   * Discover all existing tabs/windows and populate state
+   * Discover all existing tabs/windows and populate state.
+   * Also reconciles stored state by removing entries for tabs/windows
+   * that no longer exist in Chrome (prevents phantom accumulation).
    */
   async discoverExistingTabs() {
     try {
       const windows = await chrome.windows.getAll({ populate: true });
+
+      // Collect the set of real tab and window IDs
+      const realTabIds = new Set();
+      const realWindowIds = new Set();
+
       for (const win of windows) {
         if (win.type !== 'normal') continue;
+        realWindowIds.add(win.id);
 
         this.storage.windowStates[win.id] = {
           windowId: win.id,
@@ -92,11 +101,42 @@ class ServiceWorkerManager {
         };
 
         for (const tab of win.tabs) {
+          realTabIds.add(tab.id);
           if (!this.storage.tabStates[tab.id]) {
             this.initializeTabState(tab);
           }
         }
       }
+
+      // Prune tab states that no longer correspond to open tabs
+      const staleTabIds = [];
+      for (const tabIdStr of Object.keys(this.storage.tabStates)) {
+        const tabId = Number(tabIdStr);
+        if (!realTabIds.has(tabId)) {
+          staleTabIds.push(tabIdStr);
+          delete this.storage.tabStates[tabIdStr];
+        }
+      }
+
+      // Prune window states for windows that no longer exist
+      for (const windowIdStr of Object.keys(this.storage.windowStates)) {
+        const windowId = Number(windowIdStr);
+        if (!realWindowIds.has(windowId)) {
+          delete this.storage.windowStates[windowIdStr];
+        }
+      }
+
+      // Clean up orphaned preview_* keys from storage
+      if (staleTabIds.length > 0) {
+        try {
+          const previewKeysToRemove = staleTabIds.map(id => `preview_${id}`);
+          await chrome.storage.local.remove(previewKeysToRemove);
+          console.log(`[Infinity] Pruned ${staleTabIds.length} stale tab states and their previews`);
+        } catch (e) {
+          console.warn('[Infinity] Error cleaning up orphaned previews:', e);
+        }
+      }
+
       await this.saveStorage();
       console.log(`[Infinity] Discovered ${Object.keys(this.storage.tabStates).length} tabs across ${windows.length} windows`);
     } catch (error) {
@@ -136,12 +176,93 @@ class ServiceWorkerManager {
       });
     } catch (error) {
       console.error('[Infinity] Failed to save storage:', error);
+
+      // If quota exceeded, attempt emergency cleanup and retry
+      if (error.message && error.message.includes('quota')) {
+        console.warn('[Infinity] Quota exceeded — running emergency cleanup');
+        try {
+          // Remove all preview_* keys to free space
+          const allData = await chrome.storage.local.get(null);
+          const previewKeys = Object.keys(allData).filter(k => k.startsWith('preview_'));
+          if (previewKeys.length > 0) {
+            await chrome.storage.local.remove(previewKeys);
+            console.log(`[Infinity] Emergency cleanup removed ${previewKeys.length} preview keys`);
+          }
+          // Retry the save
+          await chrome.storage.local.set({
+            tabStates: this.storage.tabStates,
+            windowStates: this.storage.windowStates,
+            preferences: this.storage.preferences,
+          });
+          console.log('[Infinity] Save succeeded after emergency cleanup');
+        } catch (retryError) {
+          console.error('[Infinity] Save failed even after emergency cleanup:', retryError);
+        }
+      }
     }
   }
 
   /**
    * Setup all event listeners
    */
+  /**
+   * Setup alarm-based inactive tab checker.
+   * Uses chrome.alarms so it survives service worker restarts.
+   */
+  setupInactiveTabAlarm() {
+    const ALARM_NAME = 'infinity-inactive-tab-check';
+
+    chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
+
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (alarm.name === ALARM_NAME) {
+        this.sleepInactiveTabs();
+      }
+    });
+
+    console.log('[Infinity] Inactive tab alarm registered');
+  }
+
+  /**
+   * Check all tabs and sleep any that have been inactive longer than sleepThreshold.
+   * Skips the active tab in each window, pinned tabs, whitelisted/unsleepable URLs,
+   * and tabs that are already sleeping.
+   */
+  async sleepInactiveTabs() {
+    try {
+      const threshold = this.storage.preferences.sleepThreshold;
+      if (!threshold || threshold <= 0) return;
+
+      const now = Date.now();
+      const windows = await chrome.windows.getAll({ populate: true });
+
+      for (const win of windows) {
+        if (win.type !== 'normal') continue;
+
+        for (const tab of win.tabs) {
+          // Never sleep the active tab in any window
+          if (tab.active) continue;
+
+          const tabState = this.storage.tabStates[tab.id];
+          if (!tabState || tabState.state === 'sleeping' || tabState.state === 'discarded') continue;
+
+          // Respect existing skip rules
+          if (this.windowSyncManager.shouldSkipTab(tab, { pinned: true, whitelisted: true })) {
+            continue;
+          }
+
+          const inactiveMs = now - (tabState.lastActive || 0);
+          if (inactiveMs >= threshold) {
+            console.log(`[Infinity] Auto-discarding inactive tab ${tab.id} (${tab.title}) - inactive for ${Math.round(inactiveMs / 60000)}m`);
+            await this.discardTab(tab.id);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('[Infinity] Error in sleepInactiveTabs:', error);
+    }
+  }
+
   setupEventListeners() {
     // Tab activation
     chrome.tabs.onActivated.addListener((activeInfo) => {
@@ -191,6 +312,12 @@ class ServiceWorkerManager {
 
       const tabState = this.storage.tabStates[tabId];
       tabState.lastActive = Date.now();
+
+      // When a discarded tab is activated, Chrome auto-reloads it — update our state
+      if (tabState.state === 'discarded') {
+        tabState.state = 'awake';
+        console.log(`[Infinity] Discarded tab reactivated: ${tabId}`);
+      }
       // Don't auto-wake sleeping tabs on activation; require a click on suspended.html
 
       // Update window state
@@ -354,7 +481,6 @@ class ServiceWorkerManager {
       tabId: tab.id,
       windowId: tab.windowId,
       state: 'awake',
-      preview: null,
       originalUrl: tab.url || '',
       title: tab.title || '',
       favicon: tab.favIconUrl || '',
@@ -518,6 +644,67 @@ class ServiceWorkerManager {
   }
 
   /**
+   * Discard a tab using Chrome's native tab discard API.
+   * This unloads the tab from memory while keeping it in the tab strip.
+   * Chrome automatically reloads it when the user clicks on it.
+   * Used for non-active/background tabs where preview capture isn't needed.
+   */
+  async discardTab(tabId) {
+    try {
+      if (!this.storage.tabStates[tabId]) {
+        console.warn(`[Infinity] Tab not found: ${tabId}`);
+        return;
+      }
+
+      const tabState = this.storage.tabStates[tabId];
+      if (tabState.state === 'sleeping' || tabState.state === 'discarded') return;
+
+      let tab;
+      try {
+        tab = await chrome.tabs.get(tabId);
+      } catch (e) {
+        delete this.storage.tabStates[tabId];
+        await this.saveStorage();
+        return;
+      }
+
+      // Don't discard extension pages or chrome:// URLs
+      if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://') || tab.url.startsWith('about:')) {
+        return;
+      }
+
+      // Don't discard pinned tabs
+      if (tab.pinned) {
+        return;
+      }
+
+      // Don't discard the active tab (Chrome doesn't allow it anyway)
+      if (tab.active) {
+        return;
+      }
+
+      // Don't discard tabs already natively discarded by Chrome
+      if (tab.discarded) {
+        tabState.state = 'discarded';
+        await this.saveStorage();
+        return;
+      }
+
+      tabState.originalUrl = tab.url;
+      tabState.title = tab.title || '';
+      tabState.favicon = tab.favIconUrl || '';
+      tabState.state = 'discarded';
+
+      await chrome.tabs.discard(tabId);
+
+      await this.saveStorage();
+      console.log(`[Infinity] Tab discarded (native): ${tabId} - ${tabState.title}`);
+    } catch (error) {
+      console.warn(`[Infinity] Could not discard tab ${tabId}:`, error.message);
+    }
+  }
+
+  /**
    * Wake a tab — navigate it back to its original URL.
    * Also called automatically by the suspended page itself on visibility change.
    */
@@ -529,24 +716,28 @@ class ServiceWorkerManager {
       }
 
       const tabState = this.storage.tabStates[tabId];
-      if (tabState.state !== 'sleeping') return;
+      if (tabState.state !== 'sleeping' && tabState.state !== 'discarded') return;
 
+      const wasSleeping = tabState.state === 'sleeping';
       tabState.state = 'awake';
       tabState.lastActive = Date.now();
 
-      // Navigate back to the original URL if still on the suspended page
-      try {
-        const tab = await chrome.tabs.get(tabId);
-        if (tab.url && tab.url.includes('suspended.html') && tabState.originalUrl) {
-          await chrome.tabs.update(tabId, { url: tabState.originalUrl });
+      // Only navigate back for custom-sleeping tabs (on suspended.html)
+      // Discarded tabs are auto-reloaded by Chrome when activated
+      if (wasSleeping) {
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          if (tab.url && tab.url.includes('suspended.html') && tabState.originalUrl) {
+            await chrome.tabs.update(tabId, { url: tabState.originalUrl });
+          }
+        } catch (e) {
+          delete this.storage.tabStates[tabId];
         }
-      } catch (e) {
-        delete this.storage.tabStates[tabId];
-      }
 
-      // Clean up preview from storage
-      const previewKey = `preview_${tabId}`;
-      await chrome.storage.local.remove([previewKey]);
+        // Clean up preview from storage
+        const previewKey = `preview_${tabId}`;
+        await chrome.storage.local.remove([previewKey]);
+      }
 
       await this.saveStorage();
       console.log(`[Infinity] Tab woken: ${tabId}`);
@@ -576,24 +767,6 @@ class ServiceWorkerManager {
    */
   getTabState(tabId) {
     return this.storage.tabStates[tabId] || null;
-  }
-
-  /**
-   * Update tab preview
-   */
-  async updateTabPreview(tabId, previewBase64) {
-    try {
-      if (!this.storage.tabStates[tabId]) {
-        console.warn(`[Infinity] Tab not found: ${tabId}`);
-        return;
-      }
-
-      this.storage.tabStates[tabId].preview = previewBase64;
-      await this.saveStorage();
-      console.log(`[Infinity] Preview updated for tab: ${tabId}`);
-    } catch (error) {
-      console.error(`[Infinity] Error updating tab preview: ${tabId}`, error);
-    }
   }
 
   /**
@@ -629,8 +802,6 @@ class ServiceWorkerManager {
       const stored = await tabCapture.storePreview(tabId, preview, metadata);
       
       if (stored) {
-        // Also store in tab state for quick access
-        await this.updateTabPreview(tabId, preview);
         console.log(`[Infinity] Captured and stored preview for tab: ${tabId}`);
         return true;
       }
@@ -659,12 +830,6 @@ class ServiceWorkerManager {
       // Favicon: ~100 bytes
       estimatedBytes += 100;
 
-      // Preview: estimate base64 size (roughly 4/3 of actual image)
-      if (tabState.preview) {
-        // Most previews are ~50-100KB
-        estimatedBytes += Math.min(100000, tabState.preview.length);
-      }
-
       // Saved state: ~1KB average
       estimatedBytes += 1000;
     });
@@ -684,6 +849,7 @@ class ServiceWorkerManager {
       total: 0,
       awake: 0,
       sleeping: 0,
+      discarded: 0,
       memory: this.getMemoryEstimate(),
       tabs: [],
     };
@@ -692,6 +858,8 @@ class ServiceWorkerManager {
       stats.total++;
       if (tabState.state === 'awake') {
         stats.awake++;
+      } else if (tabState.state === 'discarded') {
+        stats.discarded++;
       } else {
         stats.sleeping++;
       }
@@ -713,7 +881,8 @@ class ServiceWorkerManager {
   async handleCapturePreview(message, sender, sendResponse) {
     try {
       const { tabId, preview } = message;
-      await this.updateTabPreview(tabId, preview);
+      const previewKey = `preview_${tabId}`;
+      await chrome.storage.local.set({ [previewKey]: { preview, timestamp: Date.now() } });
       sendResponse({ success: true });
     } catch (error) {
       console.error('[Infinity] Error handling capturePreview:', error);
