@@ -22,7 +22,7 @@ class WindowSyncManager {
     this.swManager = serviceWorkerManager;
     this.syncConfig = {
       enableMultiWindowSync: true,
-      sleepInactiveWindowsAfterMs: 300000, // 5 minutes
+      sleepInactiveWindowsAfterMs: 15000, // 15 seconds
       allowPinnedTabsToStayAwake: true,
       whitelist: [],
     };

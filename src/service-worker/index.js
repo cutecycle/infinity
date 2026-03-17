@@ -41,7 +41,7 @@ class ServiceWorkerManager {
       tabStates: {},
       windowStates: {},
       preferences: {
-        sleepThreshold: 300000, // 5 minutes
+        sleepThreshold: 15000, // 15 seconds
         memoryTarget: 100,
         whitelist: [],
         enabledDomains: [],
@@ -59,6 +59,8 @@ class ServiceWorkerManager {
       updateMultiWindowSyncConfig: this.handleUpdateMultiWindowSyncConfig.bind(this),
       captureTabPreviewRequest: this.handleCaptureTabPreviewRequest.bind(this),
       getPreviewStats: this.handleGetPreviewStats.bind(this),
+      getPreferences: this.handleGetPreferences.bind(this),
+      updatePreferences: this.handleUpdatePreferences.bind(this),
     };
 
     // Initialize WindowSyncManager for multi-window coordination
@@ -1047,6 +1049,42 @@ class ServiceWorkerManager {
       sendResponse({ success: true });
     } catch (error) {
       console.error('[Infinity] Error handling updateMultiWindowSyncConfig:', error);
+      sendResponse({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * Handle message: getPreferences
+   */
+  async handleGetPreferences(message, sender, sendResponse) {
+    try {
+      sendResponse({ success: true, preferences: this.storage.preferences });
+    } catch (error) {
+      console.error('[Infinity] Error handling getPreferences:', error);
+      sendResponse({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * Handle message: updatePreferences
+   */
+  async handleUpdatePreferences(message, sender, sendResponse) {
+    try {
+      const { preferences } = message;
+      this.storage.preferences = { ...this.storage.preferences, ...preferences };
+      await this.saveStorage();
+
+      // Sync sleepThreshold to multi-window sync config
+      if (preferences.sleepThreshold !== undefined) {
+        await this.windowSyncManager.updateSyncConfig({
+          sleepInactiveWindowsAfterMs: preferences.sleepThreshold,
+        });
+      }
+
+      console.log('[Infinity] Preferences updated:', this.storage.preferences);
+      sendResponse({ success: true, preferences: this.storage.preferences });
+    } catch (error) {
+      console.error('[Infinity] Error handling updatePreferences:', error);
       sendResponse({ success: false, error: error.message });
     }
   }

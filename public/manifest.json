@@ -8,7 +8,8 @@
     "windows",
     "storage",
     "offscreen",
-    "scripting"
+    "scripting",
+    "alarms"
   ],
   "host_permissions": [
     "<all_urls>"
