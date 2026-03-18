@@ -227,8 +227,9 @@ class ServiceWorkerManager {
 
   /**
    * Check all tabs and sleep any that have been inactive longer than sleepThreshold.
-   * Skips the active tab in each window, pinned tabs, whitelisted/unsleepable URLs,
+   * Skips the active tab in the FOCUSED window, pinned tabs, whitelisted/unsleepable URLs,
    * and tabs that are already sleeping.
+   * Active tabs in unfocused windows are also eligible for sleeping.
    */
   async sleepInactiveTabs() {
     try {
@@ -237,13 +238,14 @@ class ServiceWorkerManager {
 
       const now = Date.now();
       const windows = await chrome.windows.getAll({ populate: true });
+      const focusedWindowId = this.windowSyncManager.currentFocusedWindowId;
 
       for (const win of windows) {
         if (win.type !== 'normal') continue;
 
         for (const tab of win.tabs) {
-          // Never sleep the active tab in any window
-          if (tab.active) continue;
+          // Never sleep the active tab in the focused window
+          if (tab.active && win.id === focusedWindowId) continue;
 
           const tabState = this.storage.tabStates[tab.id];
           if (!tabState || tabState.state === 'sleeping' || tabState.state === 'discarded') continue;
@@ -255,8 +257,14 @@ class ServiceWorkerManager {
 
           const inactiveMs = now - (tabState.lastActive || 0);
           if (inactiveMs >= threshold) {
-            console.log(`[Infinity] Auto-discarding inactive tab ${tab.id} (${tab.title}) - inactive for ${Math.round(inactiveMs / 60000)}m`);
-            await this.discardTab(tab.id);
+            if (tab.active) {
+              // Active tab in unfocused window — use custom sleep with preview
+              console.log(`[Infinity] Auto-sleeping active tab in unfocused window ${tab.id} (${tab.title}) - inactive for ${Math.round(inactiveMs / 60000)}m`);
+              await this.sleepTab(tab.id);
+            } else {
+              console.log(`[Infinity] Auto-discarding inactive tab ${tab.id} (${tab.title}) - inactive for ${Math.round(inactiveMs / 60000)}m`);
+              await this.discardTab(tab.id);
+            }
           }
         }
       }
@@ -376,8 +384,8 @@ class ServiceWorkerManager {
 
       const tabState = this.storage.tabStates[tabId];
 
-      // Update from changeInfo
-      if (changeInfo.url) {
+      // Update from changeInfo (but don't overwrite originalUrl with our suspended page)
+      if (changeInfo.url && !changeInfo.url.includes('suspended.html')) {
         tabState.originalUrl = changeInfo.url;
       }
       if (changeInfo.title) {
@@ -387,6 +395,13 @@ class ServiceWorkerManager {
       // Update favicon if available
       if (changeInfo.favIconUrl) {
         tabState.favicon = changeInfo.favIconUrl;
+      }
+
+      // Remove suspended.html pages from history when they finish loading
+      if (changeInfo.status === 'complete' && tab.url && tab.url.includes('suspended.html')) {
+        try {
+          await chrome.history.deleteUrl({ url: tab.url });
+        } catch (_) { /* history permission may not be available */ }
       }
 
       // Proactively capture a preview when a tab finishes loading and is active.
@@ -637,6 +652,11 @@ class ServiceWorkerManager {
         `&preview=${encodeURIComponent(previewKey)}`;
 
       await chrome.tabs.update(tabId, { url: suspendedUrl });
+
+      // Remove the suspended page from browser history so zzz pages don't pollute it
+      try {
+        await chrome.history.deleteUrl({ url: suspendedUrl });
+      } catch (_) { /* history permission may not be available */ }
 
       await this.saveStorage();
       console.log(`[Infinity] Tab suspended: ${tabId} - ${tabState.title}`);
